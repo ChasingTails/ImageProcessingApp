@@ -26,6 +26,7 @@ import androidx.compose.ui.draganddrop.DragAndDropTarget
 import androidx.compose.ui.draganddrop.awtTransferable
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.ImageBitmapConfig
+import androidx.compose.ui.graphics.asAwtImage
 import androidx.compose.ui.graphics.asComposeImageBitmap
 import androidx.compose.ui.graphics.asSkiaBitmap
 import androidx.compose.ui.graphics.colorspace.ColorSpaces
@@ -419,8 +420,7 @@ fun SaveImage(image: ImageBitmap) {
     if (userSelection == JFileChooser.APPROVE_OPTION) {
         try {
             val file = fileChooser.selectedFile
-            val skiaImage = image.asSkiaBitmap()
-            val bufferedImage = skiaImage.toBufferedImage()
+            val bufferedImage = image.toAwtImage()
             ImageIO.write(bufferedImage, "png", file)
         }
         catch(e: IOException) {
