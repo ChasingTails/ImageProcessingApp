@@ -40,6 +40,7 @@ compose.desktop {
         mainClass = "gay.tinya.imageprocessing.MainKt"
 
         nativeDistributions {
+            modules("java.instrument", "java.scripting", "jdk.unsupported")
             targetFormats(TargetFormat.Dmg, TargetFormat.Msi, TargetFormat.Deb)
             packageName = "gay.tinya.imageprocessing"
             packageVersion = "1.0.0"

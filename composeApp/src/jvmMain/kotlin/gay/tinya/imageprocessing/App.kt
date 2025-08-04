@@ -1,6 +1,7 @@
 package gay.tinya.imageprocessing
 
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.draganddrop.dragAndDropTarget
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -11,12 +12,18 @@ import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.material3.Button
 import androidx.compose.material3.Checkbox
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.*
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.ExperimentalComposeUiApi
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.awt.ComposeWindow
+import androidx.compose.ui.draganddrop.DragAndDropEvent
+import androidx.compose.ui.draganddrop.DragAndDropTarget
+import androidx.compose.ui.draganddrop.awtTransferable
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.ImageBitmapConfig
 import androidx.compose.ui.graphics.asComposeImageBitmap
@@ -29,13 +36,11 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.util.fastJoinToString
 import dev.snipme.highlights.Highlights
 import dev.snipme.highlights.model.SyntaxLanguage
-import dev.snipme.highlights.model.SyntaxTheme
 import dev.snipme.highlights.model.SyntaxThemes
 import dev.snipme.kodeview.view.CodeEditText
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.GlobalScope
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.cancelChildren
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.jetbrains.compose.ui.tooling.preview.Preview
@@ -47,18 +52,21 @@ import org.jetbrains.skia.Surface
 import org.jetbrains.skiko.currentNanoTime
 import org.jetbrains.skiko.toBufferedImage
 import org.jetbrains.skiko.toImage
+import java.awt.datatransfer.DataFlavor
 import java.io.File
+import java.io.IOException
+import java.lang.System.currentTimeMillis
 import javax.imageio.ImageIO
 import javax.script.ScriptEngineManager
 import javax.swing.JFileChooser
 import javax.swing.filechooser.FileNameExtensionFilter
 import kotlin.random.Random
-import kotlin.random.nextInt
 import kotlin.random.nextUInt
 
+@OptIn(ExperimentalComposeUiApi::class, ExperimentalMaterial3Api::class)
 @Composable
 @Preview
-fun App() {
+fun App(window: ComposeWindow) {
     MaterialTheme {
         Row(Modifier.fillMaxSize()) {
             var bitmap: ImageBitmap by remember {
@@ -73,7 +81,48 @@ fun App() {
                 )
             }
             var editedBitmap by rememberSaveable { mutableStateOf(bitmap) }
+            LaunchedEffect(bitmap) {
+                editedBitmap = ImageProcessing(bitmap)
+            }
             var scriptResult by remember { mutableStateOf("") }
+
+            val dragAndDropTarget = remember {
+                object: DragAndDropTarget {
+                    override fun onDrop(event: DragAndDropEvent): Boolean {
+                        val input: List<File>? = event.awtTransferable.let {
+                            if(it.isDataFlavorSupported(DataFlavor.javaFileListFlavor)){
+                                it.getTransferData(DataFlavor.javaFileListFlavor) as List<File>
+                            }
+                            else {
+                                scriptResult = "Image loading error"
+                                null
+                            }
+                        }
+                        if(input == null){
+                            scriptResult = "No input found."
+                            return false
+                        }
+                        val file = input[0]
+                        val inputStream = ImageIO.createImageInputStream(file)
+                        val readers = ImageIO.getImageReaders(inputStream)
+                        if (!readers.hasNext()){
+                            scriptResult = "File not supported."
+                            inputStream.close()
+                            return false
+                        }
+                        val reader = readers.next()
+                        reader.input = inputStream
+                        val image = reader.read(0)
+
+                        inputStream.close()
+
+                        bitmap = image.toComposeImageBitmap()
+
+                        return true
+                    }
+
+                }
+            }
             LazyColumn(
                 Modifier.fillMaxHeight().weight(1f),
                 horizontalAlignment = Alignment.CenterHorizontally
@@ -81,7 +130,6 @@ fun App() {
                 item {
                     Button(onClick = {
                         OpenImage({ bitmap = it })
-                        editedBitmap = ImageProcessing(bitmap)
                     }) {
                         Text("Load Image")
                     }
@@ -92,7 +140,13 @@ fun App() {
                         onCheckedChange = { showOriginal = it },
                     )
                     Text(scriptResult)
-                    Box(Modifier.width(500.dp)) {
+                    Box(
+                        Modifier.width(500.dp)
+                            .dragAndDropTarget(
+                                shouldStartDragAndDrop = { true },
+                                target = dragAndDropTarget
+                            )
+                    ) {
                         if (showOriginal) {
                             Image(
                                 bitmap = bitmap,
@@ -122,7 +176,8 @@ fun App() {
             ) {
                 var highlights by remember {
                     mutableStateOf(
-                        Highlights.Builder("val newColor = Color(1.0 - color.red, 1.0 - color.green, 1.0 - color.blue)\nnewColor").language(SyntaxLanguage.KOTLIN).theme(
+                        Highlights.Builder("val newColor = Color(1.0 - color.red, 1.0 - color.green, 1.0 - color.blue)\nnewColor")
+                            .language(SyntaxLanguage.KOTLIN).theme(
                             SyntaxThemes.notepad()
                         ).build()
                     )
@@ -131,7 +186,7 @@ fun App() {
                 Row(Modifier.fillMaxWidth()) {
                     Button(onClick = {
                         SaveScript(highlights.getCode())
-                    }){
+                    }) {
                         Text("Save")
                     }
                     /*Button(onClick = {
@@ -177,7 +232,9 @@ fun App() {
         }
     }
 }
-class WrappingMatrix<T>(private val grid: List<List<T>>) {
+
+class WrappingMatrix<T>(val _grid: List<List<T>>) {
+    private val grid = _grid
     val width = grid.firstOrNull()?.size ?: 0
     val height = grid.size
 
@@ -197,33 +254,53 @@ class WrappingMatrix<T>(private val grid: List<List<T>>) {
     fun toList(): List<List<T>> = grid
 }
 
-data class Color(val red: Double, val green: Double, val blue: Double){
+data class Color(var red: Double, var green: Double, var blue: Double) {
     operator fun plus(other: Color): Color {
         return Color(red + other.red, green + other.green, blue + other.blue)
     }
+
     operator fun minus(other: Color): Color {
         return Color(red - other.red, green - other.green, blue - other.blue)
     }
+
     operator fun times(factor: Double): Color {
         return Color(red * factor, green * factor, blue * factor)
     }
+
     operator fun times(other: Color): Color {
         return Color(red * other.red, green * other.green, blue * other.blue)
     }
+
     operator fun div(factor: Double): Color {
         return Color(red / factor, green / factor, blue / factor)
     }
+
     operator fun div(other: Color): Color {
         return Color(red / other.red, green / other.green, blue / other.blue)
     }
+
+    fun floor(decimalPoints: Int): Color {
+        return Color(
+            ((red * decimalPoints).toInt() / decimalPoints.toDouble()),
+            ((green * decimalPoints).toInt() / decimalPoints.toDouble()),
+            ((blue * decimalPoints).toInt() / decimalPoints.toDouble())
+        )
+    }
+}
+
+fun time(): Double {
+    val now = currentNanoTime()
+    return now * 1e-9
 }
 
 fun EvalScript(script: String, scriptResult: (String) -> Unit): ((Int, Int, Color, WrappingMatrix<Color>) -> Color)? {
     val engine = ScriptEngineManager().getEngineByExtension("kts")
         ?: throw IllegalStateException("Kotlin engine not found")
-
     val editedScript = "import gay.tinya.imageprocessing.Color\n" +
             "import gay.tinya.imageprocessing.WrappingMatrix\n" +
+            "import kotlin.random.Random\n" +
+            "import kotlin.math.*\n" +
+            "\n" +
             "run<(Int, Int, Color, WrappingMatrix<Color>) -> Color> {\n" +
             "{ x: Int, y: Int, color: Color, texture: WrappingMatrix<Color> ->\n" +
             script +
@@ -231,16 +308,15 @@ fun EvalScript(script: String, scriptResult: (String) -> Unit): ((Int, Int, Colo
             "\n}"
     val result = try {
         engine.eval(editedScript)
-    }
-    catch (e: Exception) {
+    } catch (e: Exception) {
         val lines = e.message?.lines()
-        scriptResult((lines?.filter { it.trimStart().startsWith("ERROR")})?.fastJoinToString("\n") ?: "")
-        return { _, _, color, _ -> color}
+        scriptResult((lines?.filter { it.trimStart().startsWith("ERROR") })?.fastJoinToString("\n") ?: "")
+        return { _, _, color, _ -> color }
     }
-    val fn = result  as? (Int, Int, Color, WrappingMatrix<Color>) -> Color
-    if(fn == null) {
+    val fn = result as? (Int, Int, Color, WrappingMatrix<Color>) -> Color
+    if (fn == null) {
         scriptResult("Error: Script did not return a valid function.")
-        return { _, _, color, _ -> color}
+        return { _, _, color, _ -> color }
     }
     scriptResult("Success")
     return fn
@@ -269,39 +345,42 @@ var SpecialEffect: (Int, Int, Color, WrappingMatrix<Color>) -> Color = { x: Int,
     newColor
 }
 
-fun ImageProcessing(original: ImageBitmap): ImageBitmap {
+suspend fun ImageProcessing(original: ImageBitmap): ImageBitmap = withContext(Dispatchers.Default){
     var bitmap = ConvertToSkiaBGRAImage(original)
     var pixels = bitmap.readPixels()
     pixels?.let {
-        var newPixels: MutableList<MutableList<Color>> = mutableListOf()
+
+        val newPixels = mutableListOf<MutableList<Color>>()
         for (y in 0 until bitmap.height) {
-            var pixelLine: MutableList<Color> = mutableListOf()
+            var pixelRow = mutableListOf<Color>()
             for (x in 0 until bitmap.width) {
                 val index = (y * bitmap.width + x) * 4
                 val b = (pixels[index].toInt() and 0xFF) / 255.0
                 val g = (pixels[index + 1].toInt() and 0xFF) / 255.0
                 val r = (pixels[index + 2].toInt() and 0xFF) / 255.0
-
-                val pixel = Color(r,g,b)
-                pixelLine.add(pixel)
+                val pixel = Color(r, g, b)
+                pixelRow.add(pixel)
             }
-            newPixels.add(pixelLine)
+            newPixels.add(pixelRow)
         }
+        val texture = WrappingMatrix(newPixels)
+        coroutineScope {
+            (0 until bitmap.height).map { y ->
+                launch {
+                    for (x in 0 until bitmap.width) {
+                        val index = (y * bitmap.width + x) * 4
+                        val b = (pixels[index].toInt() and 0xFF) / 255.0
+                        val g = (pixels[index + 1].toInt() and 0xFF) / 255.0
+                        val r = (pixels[index + 2].toInt() and 0xFF) / 255.0
 
-        for (y in 0 until newPixels.size) {
-            for (x in 0 until newPixels[0].size) {
-
-                newPixels[y][x] = SpecialEffect(x, y, newPixels[y][x], WrappingMatrix(newPixels))
-                val index = (y * bitmap.width + x) * 4
-                val b = index
-                val g = index + 1
-                val r = index + 2
-                val a = index + 3
-
-                pixels[r] = (newPixels[y][x].red * 255).toInt().toByte()
-                pixels[g] = (newPixels[y][x].green * 255).toInt().toByte()
-                pixels[b] = (newPixels[y][x].blue * 255).toInt().toByte()
-                pixels[a] = 255.toByte()
+                        val pixel = Color(r, g, b)
+                        val newPixel = SpecialEffect(x, y, pixel, texture)
+                        pixels[index + 2] = (newPixel.red * 255).toInt().toByte()
+                        pixels[index + 1] = (newPixel.green * 255).toInt().toByte()
+                        pixels[index] = (newPixel.blue * 255).toInt().toByte()
+                        pixels[index + 3] = 255.toByte()
+                    }
+                }
             }
         }
 
@@ -310,7 +389,7 @@ fun ImageProcessing(original: ImageBitmap): ImageBitmap {
 
 
 
-    return bitmap.asComposeImageBitmap()
+    return@withContext bitmap.asComposeImageBitmap()
 }
 
 
@@ -338,10 +417,15 @@ fun SaveImage(image: ImageBitmap) {
 
     val userSelection = fileChooser.showSaveDialog(null)
     if (userSelection == JFileChooser.APPROVE_OPTION) {
-        val file = fileChooser.selectedFile
-        val skiaImage = image.asSkiaBitmap()
-        val bufferedImage = skiaImage.toBufferedImage()
-        ImageIO.write(bufferedImage, "png", file)
+        try {
+            val file = fileChooser.selectedFile
+            val skiaImage = image.asSkiaBitmap()
+            val bufferedImage = skiaImage.toBufferedImage()
+            ImageIO.write(bufferedImage, "png", file)
+        }
+        catch(e: IOException) {
+            println(e.localizedMessage)
+        }
     }
 }
 
@@ -367,7 +451,7 @@ fun SaveScript(script: String) {
     val userSelection = fileChooser.showSaveDialog(null)
     if (userSelection == JFileChooser.APPROVE_OPTION) {
         var file = fileChooser.selectedFile
-        if(!file.name.endsWith(".shade")){
+        if (!file.name.endsWith(".shade")) {
             file = File(file.absolutePath + ".shade")
         }
         val text = file.writeText(script)
